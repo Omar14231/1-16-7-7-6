@@ -1,5 +1,7 @@
 -- ==========================================
--- Universal VR Rig Tracker + Auto Teleport & Smart Click
+-- NexusVR: Joystick Hands + Laser + Double Tap Click + Grab + Vignette
+-- (بدون تحويل الشاشات إلى 3D - كل شيء يطلع في اللعبة يبقى 2D عادي)
+-- Luau / Delta
 -- ==========================================
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
@@ -12,24 +14,36 @@ local player = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 
 -- ==========================================
--- ⚙️ النقاط والإعدادات
+-- Settings
 -- ==========================================
-local pointsList = {
-    Vector3.new(308.510, 109.614, -52.636)
+local HAND_MODEL_ID = 1532383399
+local HAND_SCALE = 1
+local HAND_OFFSET = CFrame.new(0, 0, 0)
+local HAND_ROTATION = CFrame.Angles(0, 0, 0)
+
+local LASER_MAX = 100
+local EXTEND_THRESHOLD = 0.25
+local DOUBLE_TAP_TIME = 0.25 -- max gap between the two taps (smaller = faster tap needed)
+local CLICK_GRACE = 1.0
+local RETURN_DELAY = 0.10 -- tiny pause after release, then the hand eases back to center smoothly
+
+local LASER_COLORS = {
+    Color3.fromRGB(0, 255, 60),
+    Color3.fromRGB(255, 50, 50),
+    Color3.fromRGB(60, 140, 255),
+    Color3.fromRGB(255, 255, 255),
 }
+local laserColorIndex = 1
+local LASER_COLOR = LASER_COLORS[1]
 
-local HAND_MODEL_ID = 1532383399                 
-local HAND_SCALE = 1                             
-local HAND_TRANSPARENCY = 0.35                   
-local HAND_OFFSET = CFrame.new(0, 0, 0)          
-local HAND_ROTATION = CFrame.Angles(0, 0, 0)     
-
-local LASER_COLOR = Color3.fromRGB(0, 255, 60)   
-local LASER_MAX = 100                            
-local LASER_THICKNESS = 0.04                     
-local EXTEND_THRESHOLD = 0.25                    
-local DOUBLE_TAP_TIME = 0.35                     
-local CLICK_GRACE = 1.0                          
+local SETTINGS = {
+    HandTransparency = 0.35,
+    LaserThickness = 0.04,
+    Vignette = true,
+    Grab = true,
+    HUD = true,
+    LaserAlways = true, -- both hand lasers are always visible
+}
 
 local env = (getgenv and getgenv()) or _G
 if env.NexusVR_Cleanup then pcall(env.NexusVR_Cleanup) end
@@ -48,65 +62,45 @@ local function notify(title, text, duration)
 end
 
 -- ==========================================
--- 🚀 الانتقال التلقائي فور التشغيل
+-- Nexus Finder
 -- ==========================================
-local function teleportToPoint(targetPos)
-    local char = player.Character or player.CharacterAdded:Wait()
-    local root = char:WaitForChild("HumanoidRootPart", 5) or char:FindFirstChild("Head")
-    if root then
-        task.wait(0.2)
-        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
-        notify("Teleport", "تم النقل إلى نقطة البداية بنجاح 📍", 3)
-    end
-end
-
-if pointsList[1] then
-    task.spawn(function()
-        teleportToPoint(pointsList[1])
-    end)
-end
-
--- ==========================================
--- محرك البحث العميق لاستخراج ملفات الـ VR
--- ==========================================
-local function scanEnvironmentDynamically()
-    local updateRemote = nil
-    local replicationRemote = nil
-
-    local searchContainers = {ReplicatedStorage, Workspace}
-    for _, container in ipairs(searchContainers) do
-        for _, obj in ipairs(container:GetDescendants()) do
-            if obj:IsA("RemoteEvent") then
-                local name = string.lower(obj.Name)
-                if name == "updateinputs" or string.find(name, "vrinput") or string.find(name, "updatehands") then
-                    updateRemote = obj
-                elseif name == "replicationready" or name == "readystate" or string.find(name, "vrready") then
-                    replicationRemote = obj
-                end
-            end
-        end
-    end
-
-    if not updateRemote then
-        notify("VR Scanner", "لم يتم العثور على RemoteEvents. قد يكون الماب محمي بشدة.", 6)
+local function scanNexusEnvironment()
+    local nexus = ReplicatedStorage:FindFirstChild("NexusVRCharacterModel")
+    if not nexus then
+        notify("NexusVR Status", "تحذير: لم يتم العثور على 'NexusVRCharacterModel'!", 6)
         return false, nil, nil
     end
 
-    notify("VR Scanner", "تم اكتشاف ملفات الـ VR وربط التحكم بنجاح ✅", 4)
+    local updateRemote = nexus:FindFirstChild("UpdateInputs")
+    local replicationRemote = nexus:FindFirstChild("ReplicationReady")
+    if not updateRemote or not replicationRemote then
+        notify("NexusVR Status", "تحذير: ملفات الـ RemoteEvents مفقودة!", 6)
+        return false, nil, nil
+    end
+
+    notify("NexusVR Scanner", "تم ربط نظام Nexus بنجاح ✅", 4)
     return true, updateRemote, replicationRemote
 end
 
-local isFE, updateInputsRemote, replicationReadyRemote = scanEnvironmentDynamically()
-if replicationReadyRemote then pcall(function() replicationReadyRemote:FireServer() end) end
+local isFE, updateInputsRemote, replicationReadyRemote = scanNexusEnvironment()
+if replicationReadyRemote then replicationReadyRemote:FireServer() end
 
 -- ==========================================
--- بناء مجسمات الأيدي والليزر
+-- Folders: visualFolder (hands/lasers, ignored by ray)
+--          uiFolder (hit by ray first, kept for compatibility)
 -- ==========================================
-local old = Workspace:FindFirstChild("Custom_VR_Visuals")
-if old then old:Destroy() end
+for _, n in ipairs({ "Custom_VR_Visuals", "Custom_VR_UI" }) do
+    local o = Workspace:FindFirstChild(n)
+    if o then o:Destroy() end
+end
+
 local visualFolder = Instance.new("Folder")
 visualFolder.Name = "Custom_VR_Visuals"
 visualFolder.Parent = Workspace
+
+local uiFolder = Instance.new("Folder")
+uiFolder.Name = "Custom_VR_UI"
+uiFolder.Parent = Workspace
 
 local controllerTemplate = nil
 do
@@ -116,7 +110,7 @@ do
     end
 end
 
-local function newPart(name, size, color)
+local function newPart(name, size, color, parent)
     local p = Instance.new("Part")
     p.Name = name
     p.Size = size
@@ -126,7 +120,7 @@ local function newPart(name, size, color)
     p.CanQuery = false
     p.CanTouch = false
     p.CastShadow = false
-    p.Parent = visualFolder
+    p.Parent = parent or visualFolder
     return p
 end
 
@@ -172,7 +166,7 @@ local function buildController(name)
             d.CanTouch = false
             d.Massless = true
             d.CastShadow = false
-            d.Transparency = math.max(d.Transparency, HAND_TRANSPARENCY)
+            d.Transparency = SETTINGS.HandTransparency
             table.insert(parts, d)
         end
     end
@@ -188,7 +182,7 @@ local function buildController(name)
         weld.Parent = holder
     end
 
-    local beam = newPart(name .. "_Laser", Vector3.new(LASER_THICKNESS, LASER_THICKNESS, 1), LASER_COLOR)
+    local beam = newPart(name .. "_Laser", Vector3.new(SETTINGS.LaserThickness, SETTINGS.LaserThickness, 1), LASER_COLOR)
     beam.Material = Enum.Material.Neon
     beam.Transparency = 1
 
@@ -197,7 +191,11 @@ local function buildController(name)
     dot.Material = Enum.Material.Neon
     dot.Transparency = 1
 
-    return { holder = holder, beam = beam, dot = dot, active = false, lastActive = 0, lastHit = nil, lastTap = 0 }
+    return {
+        holder = holder, beam = beam, dot = dot, parts = parts,
+        active = false, lastActive = 0, lastHit = nil, lastPoint = nil, lastTap = 0,
+        grab = nil, -- { att0, att1, pos, rot }
+    }
 end
 
 local hands = { Left = buildController("Visual_LeftHand"), Right = buildController("Visual_RightHand") }
@@ -205,6 +203,10 @@ local hands = { Left = buildController("Visual_LeftHand"), Right = buildControll
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
+
+local uiRayParams = RaycastParams.new()
+uiRayParams.FilterType = Enum.RaycastFilterType.Include
+uiRayParams.IgnoreWater = true
 
 local function updateLaser(h, handCF, extended)
     if not extended then
@@ -218,7 +220,8 @@ local function updateLaser(h, handCF, extended)
     local dir = handCF.LookVector * LASER_MAX
     rayParams.FilterDescendantsInstances = { visualFolder, player.Character }
 
-    local result = Workspace:Raycast(origin, dir, rayParams)
+    uiRayParams.FilterDescendantsInstances = { uiFolder }
+    local result = Workspace:Raycast(origin, dir, uiRayParams) or Workspace:Raycast(origin, dir, rayParams)
     local endPos = result and result.Position or (origin + dir)
     local len = (endPos - origin).Magnitude
     if len < 0.05 then
@@ -227,7 +230,8 @@ local function updateLaser(h, handCF, extended)
         return
     end
 
-    h.beam.Size = Vector3.new(LASER_THICKNESS, LASER_THICKNESS, len)
+    h.beam.Color = LASER_COLOR
+    h.beam.Size = Vector3.new(SETTINGS.LaserThickness, SETTINGS.LaserThickness, len)
     h.beam.CFrame = CFrame.lookAt(origin, endPos) * CFrame.new(0, 0, -len / 2)
     h.beam.Transparency = 0
 
@@ -237,103 +241,30 @@ local function updateLaser(h, handCF, extended)
     h.active = true
     h.lastActive = os.clock()
     h.lastHit = result and result.Instance or nil
+    h.lastPoint = result and result.Position or nil
 end
 
 -- ==========================================
--- 🎯 نظام النقر الذكي (Smart Interaction Engine)
--- ==========================================
-local function triggerObjectInteraction(target)
-    if not target then return false end
-    local clicked = false
-
-    -- 1. ClickDetector & ProximityPrompt
-    local node = target
-    while node and node ~= Workspace and not clicked do
-        local cd = node:FindFirstChildOfClass("ClickDetector") or node:FindFirstChildWhichIsA("ClickDetector", true)
-        if cd and fireclickdetector then
-            clicked = pcall(fireclickdetector, cd, 0)
-        end
-
-        if not clicked then
-            local pp = node:FindFirstChildOfClass("ProximityPrompt") or node:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if pp and fireproximityprompt then
-                clicked = pcall(fireproximityprompt, pp)
-            end
-        end
-        node = node.Parent
-    end
-
-    -- 2. SurfaceGui / BillboardGui Interaction
-    if not clicked then
-        local sg = target:FindFirstChildWhichIsA("SurfaceGui", true) or target:FindFirstChildWhichIsA("BillboardGui", true) or target.Parent:FindFirstChildWhichIsA("SurfaceGui", true)
-        if sg then
-            for _, btn in ipairs(sg:GetDescendants()) do
-                if btn:IsA("GuiButton") then
-                    for _, signal in ipairs({"MouseButton1Click", "MouseButton1Down", "Activated"}) do
-                        pcall(function()
-                            for _, conn in ipairs(getconnections(btn[signal])) do
-                                conn:Fire()
-                                clicked = true
-                            end
-                        end)
-                    end
-                end
-            end
-        end
-    end
-
-    -- 3. Touch/Physics Hit
-    if not clicked and target:IsA("BasePart") then
-        pcall(function()
-            firetouchinterest(player.Character.HumanoidRootPart, target, 0)
-            task.wait(0.05)
-            firetouchinterest(player.Character.HumanoidRootPart, target, 1)
-            clicked = true
-        end)
-    end
-
-    return clicked
-end
-
-local function farClick(h)
-    if os.clock() - h.lastActive > CLICK_GRACE or not h.lastHit then return end
-    local target = h.lastHit
-
-    task.spawn(function()
-        h.dot.Color = Color3.new(1, 1, 1)
-        h.dot.Size = Vector3.new(0.35, 0.35, 0.35)
-        task.wait(0.12)
-        h.dot.Color = LASER_COLOR
-        h.dot.Size = Vector3.new(0.18, 0.18, 0.18)
-    end)
-
-    triggerObjectInteraction(target)
-end
-
-local function registerTap(handName, inputObj)
-    local h = hands[handName]
-    local now = os.clock()
-    if now - h.lastTap <= DOUBLE_TAP_TIME then
-        h.lastTap = 0
-        farClick(h)
-    else
-        h.lastTap = now
-    end
-end
-
--- ==========================================
--- إعداد واجهة التحكم
+-- System & Input States
 -- ==========================================
 local leftJoyMove = Vector2.new(0, 0)
 local rightJoyMove = Vector2.new(0, 0)
 local leftZMove = 0
 local rightZMove = 0
+
+local leftTiltPitch = 0
+local rightTiltPitch = 0
+
 local leftDragging = false
 local rightDragging = false
 local leftZDragging = false
 local rightZDragging = false
+
 local zAutoCenter = false
 local currentHeight = 1.00
+
+local activeKeys = { LeftArm = false, RightArm = false }
+local releasedAt = { LeftXY = 0, RightXY = 0, LeftZ = 0, RightZ = 0 }
 
 local lastSendTime = 0
 local SEND_INTERVAL = 1 / 30
@@ -341,13 +272,25 @@ local headCF = CFrame.new()
 local leftHandCF = CFrame.new()
 local rightHandCF = CFrame.new()
 
-local parentGui
-if gethui then parentGui = gethui() else parentGui = game:GetService("CoreGui"):FindFirstChild("RobloxGui") or player:WaitForChild("PlayerGui") end
+local refreshMenu = function() end -- kept as a stub
 
-if parentGui:FindFirstChild("VR_Control_Suite") then parentGui["VR_Control_Suite"]:Destroy() end
+-- Screen Safety Setup
+local parentGui
+local success, coreGui = pcall(function() return game:GetService("CoreGui") end)
+if gethui then
+    parentGui = gethui()
+elseif success and coreGui and coreGui:FindFirstChild("RobloxGui") then
+    parentGui = coreGui:FindFirstChild("RobloxGui")
+else
+    parentGui = player:WaitForChild("PlayerGui")
+end
+
+for _, n in ipairs({ "NexusVR_Suite", "NexusVR_Vignette" }) do
+    if parentGui:FindFirstChild(n) then parentGui[n]:Destroy() end
+end
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "VR_Control_Suite"
+screenGui.Name = "NexusVR_Suite"
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 99999
 screenGui.IgnoreGuiInset = true
@@ -369,9 +312,63 @@ local function addStroke(parent, color, thickness)
     return stroke
 end
 
+-- ==========================================
+-- Vignette (comfort)
+-- ==========================================
+local vigGui = Instance.new("ScreenGui")
+vigGui.Name = "NexusVR_Vignette"
+vigGui.ResetOnSpawn = false
+vigGui.DisplayOrder = 1
+vigGui.IgnoreGuiInset = true
+vigGui.Parent = parentGui
+
+local vigFrame = Instance.new("Frame")
+vigFrame.Size = UDim2.new(1, 0, 1, 0)
+vigFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+vigFrame.BorderSizePixel = 0
+vigFrame.Active = false
+vigFrame.Parent = vigGui
+
+local vigGradient = Instance.new("UIGradient")
+vigGradient.Parent = vigFrame
+
+local vigValue = -1
+local lastCamYaw = nil
+local function setVignette(v)
+    if math.abs(v - vigValue) < 0.01 then return end
+    vigValue = v
+    local edge = 1 - v * 0.9
+    vigGradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, edge),
+        NumberSequenceKeypoint.new(0.3, 1),
+        NumberSequenceKeypoint.new(0.7, 1),
+        NumberSequenceKeypoint.new(1, edge),
+    })
+end
+setVignette(0)
+
+local vigCurrent = 0
+local function updateVignette(dt)
+    local _, yaw = camera.CFrame:ToEulerAnglesYXZ()
+    local rate = 0
+    if lastCamYaw then
+        local d = math.abs(math.deg(yaw - lastCamYaw))
+        if d > 180 then d = 360 - d end
+        rate = d / math.max(dt, 1e-3)
+    end
+    lastCamYaw = yaw
+    local target = (SETTINGS.Vignette and rate > 60) and 1 or 0
+    local speed = target > vigCurrent and 12 or 3
+    vigCurrent = vigCurrent + (target - vigCurrent) * math.min(1, dt * speed)
+    setVignette(vigCurrent)
+end
+
+-- ==========================================
+-- Unified Top-Right Control Panel
+-- ==========================================
 local mainPanel = Instance.new("Frame")
 mainPanel.Name = "ControlPanel"
-mainPanel.Size = UDim2.new(0, 210, 0, 110)
+mainPanel.Size = UDim2.new(0, 210, 0, 75)
 mainPanel.AnchorPoint = Vector2.new(1, 0)
 mainPanel.Position = UDim2.new(1, -15, 0, 15)
 mainPanel.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
@@ -381,45 +378,12 @@ mainPanel.Parent = screenGui
 addCorner(mainPanel, 8)
 addStroke(mainPanel, Color3.fromRGB(0, 170, 255), 1.5)
 
--- 🚀 زر الضغط التلقائي "إبدأ"
-local startBtn = Instance.new("TextButton")
-startBtn.Size = UDim2.new(1, -16, 0, 26)
-startBtn.Position = UDim2.new(0, 8, 0, 8)
-startBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
-startBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-startBtn.Text = "🚀 إبدأ / Force Start"
-startBtn.Font = Enum.Font.GothamBold
-startBtn.TextSize = 11
-startBtn.Parent = mainPanel
-addCorner(startBtn, 5)
-
-startBtn.MouseButton1Click:Connect(function()
-    notify("VR Engine", "جاري محاولة الضغط على زر إبدأ تلقائياً...", 3)
-    local success = false
-    -- البحث في جميع أجزاء الماب القريبة والواجهات عن زر إبدأ
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("GuiObject") then
-            local name = string.lower(obj.Name)
-            local text = (obj:IsA("TextButton") or obj:IsA("TextLabel")) and string.lower(obj.Text) or ""
-            if string.find(name, "play") or string.find(name, "start") or string.find(name, "ابدا") or string.find(name, "إبدأ") or string.find(text, "ابدا") or string.find(text, "إبدأ") or string.find(text, "play") or string.find(text, "ok") or string.find(text, "موافق") then
-                if triggerObjectInteraction(obj) then
-                    success = true
-                end
-            end
-        end
-    end
-    
-    -- إذا تعذر العثور التلقائي، يتم محاولة تفعيل الليزر المباشر
-    if not success then
-        if hands.Right.lastHit then triggerObjectInteraction(hands.Right.lastHit) end
-        if hands.Left.lastHit then triggerObjectInteraction(hands.Left.lastHit) end
-    end
-end)
-
 local zSnapBtn = Instance.new("TextButton")
+zSnapBtn.Name = "ZSnapToggle"
 zSnapBtn.Size = UDim2.new(1, -16, 0, 24)
-zSnapBtn.Position = UDim2.new(0, 8, 0, 38)
+zSnapBtn.Position = UDim2.new(0, 8, 0, 8)
 zSnapBtn.BackgroundColor3 = Color3.fromRGB(40, 20, 20)
+zSnapBtn.BackgroundTransparency = 0.2
 zSnapBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
 zSnapBtn.Text = "Z-Snap: OFF"
 zSnapBtn.Font = Enum.Font.GothamBold
@@ -428,8 +392,8 @@ zSnapBtn.Parent = mainPanel
 addCorner(zSnapBtn, 5)
 local zSnapStroke = addStroke(zSnapBtn, Color3.fromRGB(180, 50, 50), 1)
 
-zSnapBtn.MouseButton1Click:Connect(function()
-    zAutoCenter = not zAutoCenter
+local function setZSnap(on)
+    zAutoCenter = on
     if zAutoCenter then
         zSnapBtn.Text = "Z-Snap: ON"
         zSnapBtn.BackgroundColor3 = Color3.fromRGB(20, 45, 25)
@@ -441,137 +405,372 @@ zSnapBtn.MouseButton1Click:Connect(function()
         zSnapBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
         zSnapStroke.Color = Color3.fromRGB(180, 50, 50)
     end
+    refreshMenu()
+end
+
+zSnapBtn.MouseButton1Click:Connect(function()
+    setZSnap(not zAutoCenter)
 end)
 
 local heightContainer = Instance.new("Frame")
+heightContainer.Name = "HeightContainer"
 heightContainer.Size = UDim2.new(1, -16, 0, 28)
-heightContainer.Position = UDim2.new(0, 8, 0, 68)
+heightContainer.Position = UDim2.new(0, 8, 0, 38)
 heightContainer.BackgroundTransparency = 1
 heightContainer.Parent = mainPanel
 
 local decBtn = Instance.new("TextButton")
+decBtn.Name = "DecreaseBtn"
 decBtn.Size = UDim2.new(0, 32, 1, 0)
+decBtn.Position = UDim2.new(0, 0, 0, 0)
 decBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
 decBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
 decBtn.Text = "-"
+decBtn.Font = Enum.Font.GothamBold
+decBtn.TextSize = 14
 decBtn.Parent = heightContainer
 addCorner(decBtn, 5)
+addStroke(decBtn, Color3.fromRGB(80, 50, 50), 1)
 
 local displayLabel = Instance.new("TextLabel")
+displayLabel.Name = "DisplayLabel"
 displayLabel.Size = UDim2.new(1, -72, 1, 0)
 displayLabel.Position = UDim2.new(0, 36, 0, 0)
 displayLabel.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
 displayLabel.TextColor3 = Color3.fromRGB(0, 220, 255)
 displayLabel.Text = string.format("%.2f", currentHeight)
+displayLabel.Font = Enum.Font.GothamBold
+displayLabel.TextSize = 12
 displayLabel.Parent = heightContainer
 addCorner(displayLabel, 5)
+addStroke(displayLabel, Color3.fromRGB(40, 60, 80), 1)
 
 local incBtn = Instance.new("TextButton")
+incBtn.Name = "IncreaseBtn"
 incBtn.Size = UDim2.new(0, 32, 1, 0)
 incBtn.Position = UDim2.new(1, -32, 0, 0)
 incBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
 incBtn.TextColor3 = Color3.fromRGB(100, 255, 150)
 incBtn.Text = "+"
+incBtn.Font = Enum.Font.GothamBold
+incBtn.TextSize = 14
 incBtn.Parent = heightContainer
 addCorner(incBtn, 5)
+addStroke(incBtn, Color3.fromRGB(50, 80, 50), 1)
 
-local function updateHeightDisplay()
+local function setHeight(v)
+    currentHeight = math.clamp(math.floor(v * 100 + 0.5) / 100, 0.00, 5.00)
     displayLabel.Text = string.format("%.2f", currentHeight)
     local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-    if hum then hum.HipHeight = 2.0 * currentHeight end
+    if hum then
+        hum.HipHeight = 2.0 * currentHeight
+    end
+    refreshMenu()
 end
-decBtn.MouseButton1Click:Connect(function() currentHeight = math.clamp(currentHeight - 0.10, 0.00, 5.00); updateHeightDisplay() end)
-incBtn.MouseButton1Click:Connect(function() currentHeight = math.clamp(currentHeight + 0.10, 0.00, 5.00); updateHeightDisplay() end)
 
-local leftThumbInstance, rightThumbInstance, leftZThumbInstance, rightZThumbInstance
+decBtn.MouseButton1Click:Connect(function() setHeight(currentHeight - 0.10) end)
+incBtn.MouseButton1Click:Connect(function() setHeight(currentHeight + 0.10) end)
+
+-- ==========================================
+-- Grab (physics, held while finger stays down after double tap)
+-- ==========================================
+local function releaseGrab(h)
+    local g = h.grab
+    if not g then return end
+    h.grab = nil
+    pcall(function() g.pos:Destroy() end)
+    pcall(function() g.rot:Destroy() end)
+    pcall(function() g.att0:Destroy() end)
+    pcall(function() g.att1:Destroy() end)
+end
+
+local function startGrab(h, target, point)
+    releaseGrab(h)
+    local att0 = Instance.new("Attachment")
+    att0.WorldCFrame = CFrame.new(point or target.Position)
+    att0.Parent = target
+
+    local att1 = Instance.new("Attachment")
+    att1.CFrame = h.holder.CFrame:ToObjectSpace(att0.WorldCFrame)
+    att1.Parent = h.holder
+
+    local pos = Instance.new("AlignPosition")
+    pos.Mode = Enum.PositionAlignmentMode.TwoAttachment
+    pos.Attachment0 = att0
+    pos.Attachment1 = att1
+    pos.MaxForce = math.huge
+    pos.MaxVelocity = math.huge
+    pos.Responsiveness = 50
+    pos.Parent = target
+
+    local rot = Instance.new("AlignOrientation")
+    rot.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+    rot.Attachment0 = att0
+    rot.Attachment1 = att1
+    rot.MaxTorque = math.huge
+    rot.MaxAngularVelocity = math.huge
+    rot.Responsiveness = 50
+    rot.Parent = target
+
+    h.grab = { att0 = att0, att1 = att1, pos = pos, rot = rot }
+end
+
+-- ==========================================
+-- Smart Interaction Engine
+-- ==========================================
+local function triggerObjectInteraction(target, allowTouch)
+    if not target then return false end
+    local clicked = false
+
+    local node = target
+    while node and node ~= Workspace and not clicked do
+        local cd = node:FindFirstChildOfClass("ClickDetector") or node:FindFirstChildWhichIsA("ClickDetector", true)
+        if cd and fireclickdetector then
+            clicked = pcall(fireclickdetector, cd, 0)
+        end
+
+        if not clicked then
+            local pp = node:FindFirstChildOfClass("ProximityPrompt") or node:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if pp and fireproximityprompt then
+                clicked = pcall(fireproximityprompt, pp)
+            end
+        end
+        node = node.Parent
+    end
+
+    if not clicked then
+        local sg = target:FindFirstChildWhichIsA("SurfaceGui", true) or target:FindFirstChildWhichIsA("BillboardGui", true) or (target.Parent and target.Parent:FindFirstChildWhichIsA("SurfaceGui", true))
+        if sg and getconnections then
+            for _, btn in ipairs(sg:GetDescendants()) do
+                if btn:IsA("GuiButton") then
+                    for _, signal in ipairs({"MouseButton1Click", "MouseButton1Down", "Activated"}) do
+                        pcall(function()
+                            for _, conn in ipairs(getconnections(btn[signal])) do
+                                conn:Fire()
+                                clicked = true
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    if not clicked and allowTouch and target:IsA("BasePart") and firetouchinterest then
+        pcall(function()
+            firetouchinterest(player.Character.HumanoidRootPart, target, 0)
+            task.wait(0.05)
+            firetouchinterest(player.Character.HumanoidRootPart, target, 1)
+            clicked = true
+        end)
+    end
+
+    return clicked
+end
+
+local function flashDot(h)
+    task.spawn(function()
+        h.dot.Color = Color3.new(1, 1, 1)
+        h.dot.Size = Vector3.new(0.35, 0.35, 0.35)
+        task.wait(0.12)
+        h.dot.Color = LASER_COLOR
+        h.dot.Size = Vector3.new(0.18, 0.18, 0.18)
+    end)
+end
+
+local function farClick(h)
+    if os.clock() - h.lastActive > CLICK_GRACE or not h.lastHit then return end
+    local target = h.lastHit
+    local point = h.lastPoint
+
+    flashDot(h)
+
+    local grabbable = SETTINGS.Grab and target:IsA("BasePart") and not target.Anchored
+    task.spawn(function()
+        triggerObjectInteraction(target, not grabbable)
+    end)
+    if grabbable then
+        startGrab(h, target, point)
+    end
+end
+
+local function registerTap(handName, inputObj)
+    local h = hands[handName]
+    local now = os.clock()
+    if now - h.lastTap <= DOUBLE_TAP_TIME then
+        h.lastTap = 0
+        farClick(h)
+    else
+        h.lastTap = now
+    end
+end
+
+-- ==========================================
+-- Joysticks & Depth Sliders (With Double Tap)
+-- ==========================================
+local leftThumbInstance, rightThumbInstance
+local leftZThumbInstance, rightZThumbInstance
 
 local function createJoystick(name, anchor, pos, color, isRight)
     local handName = isRight and "Right" or "Left"
     local pad = Instance.new("Frame")
+    pad.Name = name .. "_Pad"
     pad.Size = UDim2.new(0, 170, 0, 170)
     pad.AnchorPoint = anchor
     pad.Position = pos
     pad.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
     pad.BackgroundTransparency = 0.35
+    pad.BorderSizePixel = 0
+    pad.Active = true
     pad.Parent = screenGui
     addCorner(pad, 85)
     addStroke(pad, color, 1.5)
 
     local thumb = Instance.new("ImageButton")
+    thumb.Name = "Thumb"
     thumb.Size = UDim2.new(0, 58, 0, 58)
     thumb.Position = UDim2.new(0.5, -29, 0.5, -29)
     thumb.BackgroundColor3 = color
     thumb.BackgroundTransparency = 0.15
+    thumb.BorderSizePixel = 0
     thumb.Parent = pad
     addCorner(thumb, 29)
 
     if isRight then rightThumbInstance = thumb else leftThumbInstance = thumb end
+
     local dragging = false
     local activeInput = nil
 
+    local startPos = Vector2.new(0, 0)
+    local startOffset = Vector2.new(0, 0)
+
+    -- Relative drag: pressing again keeps the hand exactly where it is,
+    -- and moving the finger only adds to the current position.
     local function updateInput(input)
-        local center = pad.AbsolutePosition + (pad.AbsoluteSize / 2)
-        local delta = Vector2.new(input.Position.X, input.Position.Y) - center
         local maxDist = (pad.AbsoluteSize.X / 2) - 15
-        local dist = math.clamp(delta.Magnitude, 0, maxDist)
-        local dir = delta.Magnitude > 0 and delta.Unit or Vector2.new(0, 0)
-        thumb.Position = UDim2.new(0.5, (-thumb.AbsoluteSize.X / 2) + (dir.X * dist), 0.5, (-thumb.AbsoluteSize.Y / 2) + (dir.Y * dist))
-        local moveVec = Vector2.new(dir.X * (dist/maxDist), -dir.Y * (dist/maxDist))
+        local cur = Vector2.new(input.Position.X, input.Position.Y)
+        local off = startOffset + (cur - startPos)
+        if off.Magnitude > maxDist then off = off.Unit * maxDist end
+
+        thumb.Position = UDim2.new(0.5, (-thumb.AbsoluteSize.X / 2) + off.X, 0.5, (-thumb.AbsoluteSize.Y / 2) + off.Y)
+        local moveVec = Vector2.new(off.X / maxDist, -off.Y / maxDist)
+
         if isRight then rightJoyMove = moveVec else leftJoyMove = moveVec end
     end
 
     thumb.InputBegan:Connect(function(input)
         if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not dragging then
-            dragging = true; activeInput = input
+            dragging = true
+            activeInput = input
             if isRight then rightDragging = true else leftDragging = true end
-            registerTap(handName, input); updateInput(input)
+            local maxDist = (pad.AbsoluteSize.X / 2) - 15
+            local mv = isRight and rightJoyMove or leftJoyMove
+            startOffset = Vector2.new(mv.X * maxDist, -mv.Y * maxDist)
+            startPos = Vector2.new(input.Position.X, input.Position.Y)
+            registerTap(handName, input)
         end
     end)
-    conns[#conns + 1] = UserInputService.InputChanged:Connect(function(input) if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseMovement) then updateInput(input) end end)
-    conns[#conns + 1] = UserInputService.InputEnded:Connect(function(input) if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then dragging = false; activeInput = nil; if isRight then rightDragging = false else leftDragging = false end end end)
+
+    conns[#conns + 1] = UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            updateInput(input)
+        end
+    end)
+
+    conns[#conns + 1] = UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            activeInput = nil
+            if isRight then rightDragging = false else leftDragging = false end
+            releasedAt[handName .. "XY"] = os.clock()
+            releaseGrab(hands[handName])
+        end
+    end)
 end
 
 local function createDepthJoystick(name, anchor, pos, color, isRight)
     local handName = isRight and "Right" or "Left"
     local pad = Instance.new("Frame")
+    pad.Name = name .. "_Z_Pad"
     pad.Size = UDim2.new(0, 65, 0, 170)
     pad.AnchorPoint = anchor
     pad.Position = pos
     pad.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
     pad.BackgroundTransparency = 0.35
+    pad.BorderSizePixel = 0
+    pad.Active = true
     pad.Parent = screenGui
     addCorner(pad, 12)
     addStroke(pad, color, 1.5)
 
     local thumb = Instance.new("ImageButton")
+    thumb.Name = "Thumb"
     thumb.Size = UDim2.new(0, 50, 0, 36)
     thumb.Position = UDim2.new(0.5, -25, 0.5, -18)
     thumb.BackgroundColor3 = color
     thumb.BackgroundTransparency = 0.15
+    thumb.BorderSizePixel = 0
     thumb.Parent = pad
     addCorner(thumb, 8)
 
     if isRight then rightZThumbInstance = thumb else leftZThumbInstance = thumb end
-    local dragging = false; local activeInput = nil
+
+    local dragging = false
+    local activeInput = nil
+
+    local startY = 0
+    local startOffsetY = 0
 
     local function updateDepth(input)
-        local centerY = pad.AbsolutePosition.Y + (pad.AbsoluteSize.Y / 2)
         local maxDist = (pad.AbsoluteSize.Y / 2) - 24
-        local clampedY = math.clamp(input.Position.Y - centerY, -maxDist, maxDist)
+        local clampedY = math.clamp(startOffsetY + (input.Position.Y - startY), -maxDist, maxDist)
+
         thumb.Position = UDim2.new(0.5, -thumb.AbsoluteSize.X / 2, 0.5, (-thumb.AbsoluteSize.Y / 2) + clampedY)
+
         local intensity = -clampedY / maxDist
         if isRight then rightZMove = intensity else leftZMove = intensity end
     end
 
     thumb.InputBegan:Connect(function(input)
         if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not dragging then
-            dragging = true; activeInput = input
+            dragging = true
+            activeInput = input
             if isRight then rightZDragging = true else leftZDragging = true end
-            registerTap(handName, input); updateDepth(input)
+            local maxDist = (pad.AbsoluteSize.Y / 2) - 24
+            local z = isRight and rightZMove or leftZMove
+            startOffsetY = -z * maxDist
+            startY = input.Position.Y
+            registerTap(handName, input)
         end
     end)
-    conns[#conns + 1] = UserInputService.InputChanged:Connect(function(input) if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseMovement) then updateDepth(input) end end)
-    conns[#conns + 1] = UserInputService.InputEnded:Connect(function(input) if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then dragging = false; activeInput = nil; if isRight then rightZDragging = false else leftZDragging = false end end end)
+
+    conns[#conns + 1] = UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            updateDepth(input)
+        end
+    end)
+
+    conns[#conns + 1] = UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input == activeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            activeInput = nil
+            if isRight then rightZDragging = false else leftZDragging = false end
+            releasedAt[handName .. "Z"] = os.clock()
+            releaseGrab(hands[handName])
+        end
+    end)
+end
+
+local function placeThumbXY(thumb, mv)
+    if not thumb then return end
+    local maxDist = (thumb.Parent.AbsoluteSize.X / 2) - 15
+    thumb.Position = UDim2.new(0.5, (-thumb.AbsoluteSize.X / 2) + mv.X * maxDist, 0.5, (-thumb.AbsoluteSize.Y / 2) - mv.Y * maxDist)
+end
+
+local function placeThumbZ(thumb, z)
+    if not thumb then return end
+    local maxDist = (thumb.Parent.AbsoluteSize.Y / 2) - 24
+    thumb.Position = UDim2.new(0.5, -thumb.AbsoluteSize.X / 2, 0.5, (-thumb.AbsoluteSize.Y / 2) - z * maxDist)
 end
 
 createJoystick("Left", Vector2.new(0, 1), UDim2.new(0, 20, 1, -60), Color3.fromRGB(255, 75, 75), false)
@@ -580,28 +779,39 @@ createJoystick("Right", Vector2.new(1, 1), UDim2.new(1, -20, 1, -60), Color3.fro
 createDepthJoystick("Right", Vector2.new(1, 1), UDim2.new(1, -200, 1, -60), Color3.fromRGB(120, 180, 255), true)
 
 -- ==========================================
--- معالجة الحركة
+-- Core Tracking Loops & VR Kinematics
 -- ==========================================
 conns[#conns + 1] = RunService.RenderStepped:Connect(function(deltaTime)
     local lerpSpeed = math.clamp(deltaTime * 10, 0.05, 0.25)
 
-    if not leftDragging then
-        leftJoyMove = leftJoyMove:Lerp(Vector2.new(0, 0), lerpSpeed)
-        if leftThumbInstance then leftThumbInstance.Position = leftThumbInstance.Position:Lerp(UDim2.new(0.5, -29, 0.5, -29), lerpSpeed) end
+    updateVignette(deltaTime)
+
+    -- After release: hold position for RETURN_DELAY, then ease back gradually
+    local now = os.clock()
+    local ret = math.clamp(deltaTime * 5, 0.02, 0.2)
+
+    if not leftDragging and not activeKeys.LeftArm and now - releasedAt.LeftXY > RETURN_DELAY then
+        leftJoyMove = leftJoyMove:Lerp(Vector2.new(0, 0), ret)
+        if leftJoyMove.Magnitude < 0.003 then leftJoyMove = Vector2.new(0, 0) end
+        placeThumbXY(leftThumbInstance, leftJoyMove)
     end
-    if not rightDragging then
-        rightJoyMove = rightJoyMove:Lerp(Vector2.new(0, 0), lerpSpeed)
-        if rightThumbInstance then rightThumbInstance.Position = rightThumbInstance.Position:Lerp(UDim2.new(0.5, -29, 0.5, -29), lerpSpeed) end
+
+    if not rightDragging and not activeKeys.RightArm and now - releasedAt.RightXY > RETURN_DELAY then
+        rightJoyMove = rightJoyMove:Lerp(Vector2.new(0, 0), ret)
+        if rightJoyMove.Magnitude < 0.003 then rightJoyMove = Vector2.new(0, 0) end
+        placeThumbXY(rightThumbInstance, rightJoyMove)
     end
 
     if zAutoCenter then
-        if not leftZDragging then
-            leftZMove = math.clamp(leftZMove * (1 - lerpSpeed), 0, 1)
-            if leftZThumbInstance then leftZThumbInstance.Position = leftZThumbInstance.Position:Lerp(UDim2.new(0.5, -25, 0.5, -18), lerpSpeed) end
+        if not leftZDragging and now - releasedAt.LeftZ > RETURN_DELAY then
+            leftZMove = leftZMove * (1 - ret)
+            if math.abs(leftZMove) < 0.003 then leftZMove = 0 end
+            placeThumbZ(leftZThumbInstance, leftZMove)
         end
-        if not rightZDragging then
-            rightZMove = math.clamp(rightZMove * (1 - lerpSpeed), 0, 1)
-            if rightZThumbInstance then rightZThumbInstance.Position = rightZThumbInstance.Position:Lerp(UDim2.new(0.5, -25, 0.5, -18), lerpSpeed) end
+        if not rightZDragging and now - releasedAt.RightZ > RETURN_DELAY then
+            rightZMove = rightZMove * (1 - ret)
+            if math.abs(rightZMove) < 0.003 then rightZMove = 0 end
+            placeThumbZ(rightZThumbInstance, rightZMove)
         end
     end
 
@@ -609,22 +819,38 @@ conns[#conns + 1] = RunService.RenderStepped:Connect(function(deltaTime)
     if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Head") then
         local rootCF = char.HumanoidRootPart.CFrame
         local lookX, lookY, lookZ = camera.CFrame:ToEulerAnglesXYZ()
-        headCF = CFrame.new(rootCF.Position + Vector3.new(0, 1.5 * currentHeight, 0)) * CFrame.Angles(lookX, lookY, lookZ)
+
+        local headYOffset = 1.5 * currentHeight
+        headCF = CFrame.new(rootCF.Position + Vector3.new(0, headYOffset, 0)) * CFrame.Angles(lookX, lookY, lookZ)
 
         local maxReach = 1.5 * currentHeight
-        local leftYPos = math.clamp(0.2 + (leftJoyMove.Y * maxReach), -3.6, 2.5 * maxReach)
-        local rightYPos = math.clamp(0.2 + (rightJoyMove.Y * maxReach), -3.6, 2.5 * maxReach)
+        local armDrop = 0.2
+
+        local leftYPos = math.clamp(armDrop + (leftJoyMove.Y * maxReach), -3.6, 2.5 * maxReach)
+        local rightYPos = math.clamp(armDrop + (rightJoyMove.Y * maxReach), -3.6, 2.5 * maxReach)
+
         local currentZ_Left = math.clamp(-1.2 - (leftZMove * 1.2 * maxReach), -2.6 * maxReach, -0.3)
         local currentZ_Right = math.clamp(-1.2 - (rightZMove * 1.2 * maxReach), -2.6 * maxReach, -0.3)
 
-        leftHandCF = rootCF * CFrame.new(-1.2 + (leftJoyMove.X * maxReach), leftYPos, currentZ_Left) * CFrame.Angles(math.rad(leftJoyMove.Y * 65 + leftZMove * 20), math.rad(-leftJoyMove.X * 50), math.rad(-leftJoyMove.X * 35 + leftZMove * 15))
-        rightHandCF = rootCF * CFrame.new(1.2 + (rightJoyMove.X * maxReach), rightYPos, currentZ_Right) * CFrame.Angles(math.rad(rightJoyMove.Y * 65 + rightZMove * 20), math.rad(-rightJoyMove.X * 50), math.rad(rightJoyMove.X * 35 - rightZMove * 15))
+        local leftVrRoll = math.rad(-leftJoyMove.X * 35) + math.rad(leftZMove * 15)
+        local rightVrRoll = math.rad(rightJoyMove.X * 35) - math.rad(rightZMove * 15)
+
+        local leftVrPitch = math.rad((leftJoyMove.Y * 65) + leftTiltPitch) + math.rad(leftZMove * 20)
+        local rightVrPitch = math.rad((rightJoyMove.Y * 65) + rightTiltPitch) + math.rad(rightZMove * 20)
+
+        leftHandCF = rootCF
+            * CFrame.new(-1.2 + (leftJoyMove.X * maxReach), leftYPos, currentZ_Left)
+            * CFrame.Angles(leftVrPitch, math.rad(-leftJoyMove.X * 50), leftVrRoll)
+
+        rightHandCF = rootCF
+            * CFrame.new(1.2 + (rightJoyMove.X * maxReach), rightYPos, currentZ_Right)
+            * CFrame.Angles(rightVrPitch, math.rad(-rightJoyMove.X * 50), rightVrRoll)
 
         hands.Left.holder.CFrame = leftHandCF
         hands.Right.holder.CFrame = rightHandCF
 
-        updateLaser(hands.Left, leftHandCF, leftJoyMove.Magnitude > EXTEND_THRESHOLD or leftZMove > EXTEND_THRESHOLD)
-        updateLaser(hands.Right, rightHandCF, rightJoyMove.Magnitude > EXTEND_THRESHOLD or rightZMove > EXTEND_THRESHOLD)
+        updateLaser(hands.Left, leftHandCF, leftJoyMove.Magnitude > EXTEND_THRESHOLD or leftZMove > EXTEND_THRESHOLD or SETTINGS.LaserAlways)
+        updateLaser(hands.Right, rightHandCF, rightJoyMove.Magnitude > EXTEND_THRESHOLD or rightZMove > EXTEND_THRESHOLD or SETTINGS.LaserAlways)
 
         local currentTime = os.clock()
         if currentTime - lastSendTime >= SEND_INTERVAL and updateInputsRemote then
@@ -634,8 +860,33 @@ conns[#conns + 1] = RunService.RenderStepped:Connect(function(deltaTime)
     end
 end)
 
+conns[#conns + 1] = RunService.Stepped:Connect(function()
+    local char = player.Character
+    if not char then return end
+
+    local neck = char:FindFirstChild("Neck", true)
+    local leftShoulder = char:FindFirstChild("Left Shoulder", true) or char:FindFirstChild("LeftShoulder", true)
+    local rightShoulder = char:FindFirstChild("Right Shoulder", true) or char:FindFirstChild("RightShoulder", true)
+
+    if neck and neck.Part0 then
+        local targetLocal = neck.Part0.CFrame:ToObjectSpace(headCF)
+        neck.Transform = neck.C0:Inverse() * targetLocal * neck.C1
+    end
+    if leftShoulder and leftShoulder.Part0 then
+        local targetLocal = leftShoulder.Part0.CFrame:ToObjectSpace(leftHandCF)
+        leftShoulder.Transform = leftShoulder.C0:Inverse() * targetLocal * leftShoulder.C1
+    end
+    if rightShoulder and rightShoulder.Part0 then
+        local targetLocal = rightShoulder.Part0.CFrame:ToObjectSpace(rightHandCF)
+        rightShoulder.Transform = rightShoulder.C0:Inverse() * targetLocal * rightShoulder.C1
+    end
+end)
+
 env.NexusVR_Cleanup = function()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    for _, h in pairs(hands) do releaseGrab(h) end
     pcall(function() visualFolder:Destroy() end)
+    pcall(function() uiFolder:Destroy() end)
     pcall(function() screenGui:Destroy() end)
+    pcall(function() vigGui:Destroy() end)
 end
